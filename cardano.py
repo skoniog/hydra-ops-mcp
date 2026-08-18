@@ -1,7 +1,8 @@
 """L1 operations via cardano-cli inside the devnet's cardano-node container.
 
-Generalizes the helper that hydra-mcp's open_head.py used: address derivation,
-UTXO queries, and the sign-and-submit step of the deposit (commit) flow.
+Address derivation, UTXO queries, chain tip, and the sign-and-submit step of
+the deposit (commit) flow. The container is where the credentials and the
+node socket already live, so L1 work happens there rather than on the host.
 """
 
 import json

@@ -89,6 +89,44 @@ def test_partial_fanout_validates_refs():
     assert "not in the head" in result["error"], result
 
 
+def test_head_status_reads_snapshot_in_both_head_shapes():
+    """An Open head nests confirmedSnapshot under coordinatedHeadState; a
+    Closed one puts it directly on contents. Both must resolve."""
+    import tools.observe as ob
+
+    class Stub:
+        def __init__(self, head):
+            self._head = head
+
+        def get_head(self):
+            return self._head
+
+        def get_utxos(self):
+            return {}
+
+        def get_head_status(self):
+            return "open"
+
+    open_head = {"tag": "Open", "contents": {"coordinatedHeadState": {
+        "version": 1, "confirmedSnapshot": {"snapshot": {"number": 7}}}}}
+    closed_head = {"tag": "Closed", "contents": {
+        "version": 2, "confirmedSnapshot": {"snapshot": {"number": 9}},
+        "contestationDeadline": "2026-01-01T00:00:00Z"}}
+
+    original = ob.get_client
+    try:
+        ob.get_client = lambda node=1: Stub(open_head)
+        r = ob.head_status()
+        assert r["snapshot_number"] == 7 and r["version"] == 1, r
+
+        ob.get_client = lambda node=1: Stub(closed_head)
+        r = ob.head_status()
+        assert r["snapshot_number"] == 9 and r["version"] == 2, r
+        assert r["contestation_deadline"] == "2026-01-01T00:00:00Z", r
+    finally:
+        ob.get_client = original
+
+
 def test_needs_confirmation_shape():
     r = needs_confirmation("do the thing", extra=1)
     assert r["status"] == "requires_confirmation"

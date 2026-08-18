@@ -1,8 +1,7 @@
 """Builds and signs in-head Cardano transactions (PyCardano).
 
-Derived from hydra-mcp's builder. Fees are zero inside the demo head (the
-devnet's protocol parameters zero them); on a real network this needs actual
-fee estimation.
+Fees are zero inside the demo head (its protocol parameters zero them); on a
+real network this needs actual fee estimation and coin selection.
 """
 
 from pathlib import Path

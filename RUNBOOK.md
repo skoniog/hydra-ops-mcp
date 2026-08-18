@@ -47,22 +47,21 @@ You'll see every arrow in that diagram fire for real in the sessions below.
 ## Session 0 — Setup (10 minutes)
 
 **You need:** Docker running, the [hydra repo](https://github.com/cardano-scaling/hydra)
-checked out at `/home/dev/claudecode/hydra`, and the two MCP projects
-(`hydra-mcp`, `hydra-ops-mcp`) with their venvs installed (see each README).
+checked out (default path `/home/dev/claudecode/hydra`, or set `HYDRA_DEMO_DIR`),
+and this project's venv installed — see the README.
 
 Start the devnet — a private Cardano chain plus three hydra-nodes:
 
 ```bash
-cd /home/dev/claudecode/hydra-mcp
+cd hydra-ops-mcp
 ./reset_devnet.sh
 ```
 
-Connect the ops server to Claude (Claude Code shown; Claude Desktop config is
-in the README):
+Connect the server to Claude (Claude Code shown; Claude Desktop config is in
+the README):
 
 ```bash
-claude mcp add hydra-ops -- /home/dev/claudecode/hydra-ops-mcp/.venv/bin/python \
-    /home/dev/claudecode/hydra-ops-mcp/server.py
+claude mcp add hydra-ops -- "$PWD/.venv/bin/python" "$PWD/server.py"
 ```
 
 **Checkpoint** — *say to Claude:*
@@ -262,25 +261,43 @@ exists to prevent exactly this.
 
 ---
 
-## Session 7 (optional) — What this is all *for*
+## Session 7 — Three nodes, one head
 
-The sibling project [`hydra-mcp`](../hydra-mcp/) shows the application layer:
-an AI agent that pays per document it reads (real head micropayments — the
-kind of sub-cent, per-call economics only an L2 makes possible) and records
-every step of its work in a hash-chained trail anchored through the head to
-L1.
+**Concept: a head is replicated, not hosted.** Every session so far talked to
+node 1. But there is no server here — alice, bob and carol each run a
+hydra-node that independently validates every transaction and signs every
+snapshot. "The head" is what all three agree on.
 
-```bash
-cd /home/dev/claudecode/hydra-mcp
-.venv/bin/python open_head.py                             # fund a fresh head
-HYDRA_MCP_MODE=devnet .venv/bin/python research_agent.py  # agent works & pays
-.venv/bin/python verify_export.py exports/research-trail-*.json
-.venv/bin/python tamper_demo.py                           # try to forge it
-```
+Open and fund a head again (Sessions 2's prompts), then:
 
-The verifier uses only the Python standard library — the point being that the
-agent's work history can be checked by someone who trusts *nothing* but
-SHA-256 and the root hash settled via the head.
+*Say to Claude:*
+> "Compare the head status on nodes 1, 2 and 3. Do they agree on the snapshot
+> number and the UTXO set?"
+
+**What to notice:**
+- All three report the same snapshot number and the same UTXO set. That
+  agreement is not replication-after-the-fact — no transaction is confirmed
+  until every node has signed the snapshot containing it.
+- Each node reports the head from its own perspective. Ask for
+  `recent_events` on node 2 and you'll see the same protocol milestones
+  arriving there independently.
+
+Now make one node do the work:
+
+*Say to Claude:*
+> "Send 2 ADA from alice to bob, but submit it through node 3. Then check
+> whether nodes 1 and 2 see it."
+
+Carol's node relays a transaction that spends alice's funds — and alice's and
+bob's nodes both end up with it, because the transaction carries alice's
+signature and the snapshot carries everyone's. **Which node you talk to is an
+operational choice, not a trust decision.** That's the property that makes a
+head genuinely peer-to-peer rather than a service one participant runs for
+the others.
+
+*Worth asking as a closer:*
+> "Given everything we did, how many L1 transactions did this head actually
+> require, and what would the same activity have cost on L1?"
 
 ---
 

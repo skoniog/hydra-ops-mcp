@@ -14,7 +14,11 @@ def head_status(node: int = 1) -> dict:
     except Exception as e:
         return err(str(e), node=node)
     contents = head.get("contents") or {}
-    snapshot = ((contents.get("confirmedSnapshot") or {}).get("snapshot") or {})
+    # An Open head nests the confirmed snapshot under coordinatedHeadState;
+    # a Closed one carries it (and the head version) directly on contents.
+    coordinated = contents.get("coordinatedHeadState") or {}
+    confirmed = coordinated.get("confirmedSnapshot") or contents.get("confirmedSnapshot") or {}
+    snapshot = confirmed.get("snapshot") or {}
     return ok(
         "ok",
         node=node,
@@ -23,7 +27,7 @@ def head_status(node: int = 1) -> dict:
         utxo_count=len(utxos),
         total_lovelace=sum(o.get("value", {}).get("lovelace", 0) for o in utxos.values()),
         snapshot_number=snapshot.get("number"),
-        version=contents.get("version"),
+        version=coordinated.get("version", contents.get("version")),
         contestation_deadline=contents.get("contestationDeadline"),
     )
 

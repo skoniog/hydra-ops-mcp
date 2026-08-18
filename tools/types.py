@@ -1,8 +1,8 @@
 """Shared response helpers.
 
-Same shape as hydra-mcp: every tool returns {status, error, ...}. State-
-changing tools additionally use needs_confirmation(): without confirm=True
-they describe what they WOULD do and change nothing.
+Every tool returns {status, error, ...}. State-changing tools additionally
+use needs_confirmation(): without confirm=True they describe what they WOULD
+do and change nothing.
 """
 
 

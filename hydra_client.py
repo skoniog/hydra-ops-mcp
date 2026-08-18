@@ -1,8 +1,8 @@
-"""Extended WebSocket + HTTP client for the hydra-node API (operator surface).
+"""WebSocket + HTTP client for the hydra-node API (operator surface).
 
-Derived from hydra-mcp's client (devnet-proven in Projects 1-3) and extended
-with the full TUI-parity command set: Decommit, PartialFanout, deposit
-recovery, and the read endpoints the TUI's tabs are built on.
+Covers the full operational command set — NewTx, Decommit, Close, Fanout,
+PartialFanout, deposit recovery — plus the read endpoints head state and
+funds views are built on.
 
 Async core with a synchronous facade: the client runs its own event loop in a
 daemon thread so tool functions can stay synchronous. One client per node;
