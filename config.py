@@ -101,27 +101,39 @@ def _workspace_parties() -> dict:
     return {}
 
 
-PARTIES = _devnet_parties() if NETWORK_NAME == "devnet" else _workspace_parties()
+def _all_parties() -> dict:
+    """Workspace-provisioned parties, plus the demo trio on devnet."""
+    base = _devnet_parties() if NETWORK_NAME == "devnet" else {}
+    return {**base, **_workspace_parties()}
+
+
+PARTIES = _all_parties()
+
+_DEVNET_BUILTINS = ("alice", "bob", "carol")
 
 
 def save_parties(parties: dict) -> None:
-    """Persist the workspace party registry (non-devnet networks only)."""
+    """Persist the workspace party registry (devnet's built-in demo parties
+    are derived, not stored)."""
     WORKSPACE.mkdir(parents=True, exist_ok=True)
-    (WORKSPACE / "parties.json").write_text(json.dumps(parties, indent=2))
+    to_store = {k: v for k, v in parties.items()
+                if not (NETWORK_NAME == "devnet" and k in _DEVNET_BUILTINS)}
+    (WORKSPACE / "parties.json").write_text(json.dumps(to_store, indent=2))
 
 
 def reload_parties() -> dict:
     global PARTIES
-    if NETWORK_NAME != "devnet":
-        PARTIES = _workspace_parties()
+    PARTIES = _all_parties()
     return PARTIES
 
 
 # ---------------------------------------------------------------- nodes
 
 def _default_nodes() -> dict:
+    """Provisioned nodes from the workspace, plus the demo trio on devnet."""
+    base = {}
     if NETWORK_NAME == "devnet":
-        return {
+        base = {
             1: {"ws": "ws://127.0.0.1:4001", "http": "http://127.0.0.1:4001",
                 "name": "alice", "metrics": None},
             2: {"ws": "ws://127.0.0.1:4002", "http": "http://127.0.0.1:4002",
@@ -131,17 +143,22 @@ def _default_nodes() -> dict:
         }
     registry = WORKSPACE / "nodes.json"
     if registry.exists():
-        return {int(k): v for k, v in json.loads(registry.read_text()).items()}
-    return {}
+        base.update({int(k): v for k, v in json.loads(registry.read_text()).items()})
+    return base
 
 
 NODES = _default_nodes()
 
 
+_DEVNET_NODE_INDICES = (1, 2, 3)
+
+
 def save_nodes(nodes: dict) -> None:
     WORKSPACE.mkdir(parents=True, exist_ok=True)
+    to_store = {k: v for k, v in nodes.items()
+                if not (NETWORK_NAME == "devnet" and k in _DEVNET_NODE_INDICES)}
     (WORKSPACE / "nodes.json").write_text(
-        json.dumps({str(k): v for k, v in nodes.items()}, indent=2))
+        json.dumps({str(k): v for k, v in to_store.items()}, indent=2))
 
 
 def reload_nodes() -> dict:
