@@ -154,6 +154,13 @@ def recover_deposit(tx_id: str, node: int = 1, confirm: bool = False) -> dict:
     return lifecycle.recover_deposit(tx_id, node, confirm)
 
 
+@mcp.tool
+def wait_for_event(tags: list, node: int = 1, timeout_seconds: int = 120) -> dict:
+    """Wait (bounded, max 600s) for one of the named server events, e.g.
+    ReadyToFanout after a short contestation period."""
+    return lifecycle.wait_for_event(tags, node, timeout_seconds)
+
+
 # --- transactions (confirm-gated) ---
 
 

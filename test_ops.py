@@ -30,6 +30,11 @@ class RecordingClient:
     def get_utxos(self):
         return self.utxos
 
+    def fanout_readiness(self):
+        # Read-only; report ready so gated tools proceed to their gate.
+        return {"ready": True, "head_state": "FanoutPossible",
+                "contestation_deadline": None, "seconds_remaining": 0.0}
+
     def __getattr__(self, name):
         def _fail(*a, **kw):
             raise AssertionError(f"state-changing call {name}() reached the client "
@@ -60,6 +65,21 @@ def test_all_lifecycle_tools_are_gated():
         result = call()
         assert result["status"] == "requires_confirmation", (name, result)
         assert "confirm=True" in result["message"], (name, result)
+
+
+def test_fanout_is_nonblocking_before_deadline():
+    """Called before the contestation deadline, fanout must report the wait
+    instead of hanging or asking for confirmation."""
+    client = RecordingClient()
+    client.fanout_readiness = lambda: {
+        "ready": False, "head_state": "Closed",
+        "contestation_deadline": "2099-01-01T00:00:00Z",
+        "seconds_remaining": 4321.0,
+    }
+    patch_client(client)
+    r = lifecycle.fanout(node=1, confirm=True)
+    assert r["status"] == "not_ready", r
+    assert r["seconds_remaining"] == 4321.0, r
 
 
 def test_commit_funds_gated_without_touching_l1():

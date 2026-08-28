@@ -125,8 +125,53 @@ class HydraClient:
             timeout,
         )
 
-    def close_head(self, timeout: float = 120.0) -> dict:
-        return self._call(self._command_and_wait({"tag": "Close"}, {"HeadIsClosed"}), timeout)
+    def close_head(self, observe_timeout: float = 90.0, retries: int = 2) -> dict:
+        """Post Close and wait (bounded) for it to be observed on-chain.
+
+        A Close tx can be silently dropped when its upper validity bound goes
+        stale (hydra issue #1039) — the node does not retry, so we do: if
+        HeadIsClosed isn't observed within observe_timeout, Close is posted
+        again, up to `retries` more times.
+        """
+        last_error = None
+        for attempt in range(1 + retries):
+            try:
+                return self._call(
+                    self._command_and_wait({"tag": "Close"}, {"HeadIsClosed"}),
+                    observe_timeout,
+                )
+            except HydraClientError:
+                raise  # a rejected command won't improve with retries
+            except Exception as e:  # timeout: possibly-dropped close tx
+                last_error = e
+        raise HydraClientError(
+            f"Close not observed on-chain after {1 + retries} attempts "
+            f"({observe_timeout:.0f}s each) — likely dropped (issue #1039); "
+            f"check chain congestion and node sync, then retry"
+        ) from last_error
+
+    def fanout_readiness(self) -> dict:
+        """Non-blocking: can Fanout be posted now, and if not, when?"""
+        status = self.get_head_status()
+        ready = status in ("fanout_possible", "fanoutpossible",
+                           "fanning_out", "fanningout")
+        remaining = None
+        deadline = None
+        head = self.get_head()
+        if head.get("tag") == "Closed":
+            deadline = (head.get("contents") or {}).get("contestationDeadline")
+            if deadline:
+                from datetime import datetime, timezone
+                try:
+                    dt = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+                    remaining = max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
+                except ValueError:
+                    pass
+        elif head.get("tag") == "FanoutPossible":
+            ready = True
+        return {"ready": ready, "head_state": head.get("tag"),
+                "contestation_deadline": deadline,
+                "seconds_remaining": remaining}
 
     def decommit(self, tx_envelope: dict, timeout: float = 120.0) -> dict:
         return self._call(
@@ -138,6 +183,8 @@ class HydraClient:
         )
 
     def fanout(self, timeout: float = 300.0) -> dict:
+        """Post Fanout (the head must already be past its deadline — check
+        fanout_readiness first) and wait for finalization."""
         return self._call(self._fanout(), timeout)
 
     def partial_fanout(self, utxo: dict, timeout: float = 300.0) -> dict:
@@ -276,9 +323,11 @@ class HydraClient:
 
     async def _await_fanout_ready(self):
         # "fanning_out" counts: after a first PartialFanout the node awaits the
-        # next selection and never re-emits ReadyToFanout.
+        # next selection and never re-emits ReadyToFanout. The wait here is a
+        # short grace for the just-past-deadline race only — long waits belong
+        # to the caller (fanout_readiness / wait_for), never inside a command.
         if self._head_status not in ("fanout_possible", "fanoutpossible", "fanning_out", "fanningout"):
-            await self._wait_for_event({"ReadyToFanout"})
+            await asyncio.wait_for(self._wait_for_event({"ReadyToFanout"}), timeout=120.0)
 
     async def _fanout(self) -> dict:
         await self._await_fanout_ready()
