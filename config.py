@@ -1,45 +1,159 @@
-"""Configuration for hydra-ops-mcp.
+"""Configuration for hydra-ops-mcp v2.
 
-An operator-facing MCP server for Hydra heads. Targets the local demo devnet
-by default; every URL/path here is overridable via environment variables so
-the same server can point at other nodes.
+Everything is environment-overridable. Three axes:
+
+  HYDRA_OPS_NETWORK   devnet (default) | preview | preprod | mainnet
+  HYDRA_OPS_PROVIDER  docker (default on devnet) | cli | blockfrost
+  HYDRA_OPS_WORKSPACE where generated keys, configs and node state live
+
+On the devnet everything defaults to v1 behavior (docker provider, demo
+parties alice/bob/carol with keys in the demo credentials directory). On a
+real network, parties and keys come from the workspace, created by the
+provisioning tools (generate_keys, node_plan, start_node).
 """
 
+import json
 import os
 from pathlib import Path
 
-# The three demo hydra-nodes (alice, bob, carol). Tools take `node: int`
-# and resolve it against this table.
-NODES = {
-    1: {"ws": "ws://127.0.0.1:4001", "http": "http://127.0.0.1:4001", "name": "alice"},
-    2: {"ws": "ws://127.0.0.1:4002", "http": "http://127.0.0.1:4002", "name": "bob"},
-    3: {"ws": "ws://127.0.0.1:4003", "http": "http://127.0.0.1:4003", "name": "carol"},
-}
+from networks import network
 
-# Where the hydra demo devnet lives (docker compose project + credentials).
+# ---------------------------------------------------------------- axes
+
+NETWORK_NAME = os.environ.get("HYDRA_OPS_NETWORK", "devnet")
+NET = network(NETWORK_NAME)
+NETWORK_MAGIC = NET["magic"]
+IS_MAINNET = NET["mainnet"]
+
+PROVIDER = os.environ.get(
+    "HYDRA_OPS_PROVIDER", "docker" if NETWORK_NAME == "devnet" else "blockfrost"
+)
+
+WORKSPACE = Path(os.environ.get(
+    "HYDRA_OPS_WORKSPACE", str(Path.home() / ".hydra-ops" / NETWORK_NAME)
+))
+
+# ---------------------------------------------------------------- provider inputs
+
+# blockfrost provider / node backend
+BLOCKFROST_PROJECT_FILE = os.environ.get(
+    "BLOCKFROST_PROJECT_FILE", str(WORKSPACE / "blockfrost-project.txt")
+)
+
+# cli provider
+CARDANO_CLI = os.environ.get("CARDANO_CLI", "cardano-cli")
+NODE_SOCKET = os.environ.get("CARDANO_NODE_SOCKET_PATH", "")
+
+# docker provider (devnet)
 DEMO_DIR = Path(os.environ.get("HYDRA_DEMO_DIR", "/home/dev/claudecode/hydra/demo"))
 
-# The local hydra source checkout, used by explain_error to decode on-chain
-# error codes from the Plutus source.
+# Local hydra checkout, for decoding on-chain abort codes.
 HYDRA_REPO = Path(os.environ.get("HYDRA_REPO", "/home/dev/claudecode/hydra"))
 
-NETWORK_MAGIC = 42
+# hydra-node docker image for provisioned nodes. 2.3.0 is the latest release;
+# "unstable" (master builds) adds PartialFanout but needs self-published scripts
+# on real networks.
+HYDRA_NODE_IMAGE = os.environ.get(
+    "HYDRA_NODE_IMAGE", "ghcr.io/cardano-scaling/hydra-node:2.3.0"
+)
+HYDRA_NODE_VERSION = os.environ.get("HYDRA_NODE_VERSION", "2.3.0")
 
-# Operator signing keys, per party, as paths inside the cardano-node container
-# (credentials are mounted at /devnet). The -funds keys hold spendable ADA.
-CONTAINER_CREDENTIALS = "/devnet/credentials"
-FUNDS_KEYS = {
-    "alice": {"sk": f"{CONTAINER_CREDENTIALS}/alice-funds.sk",
-              "vk": f"{CONTAINER_CREDENTIALS}/alice-funds.vk"},
-    "bob": {"sk": f"{CONTAINER_CREDENTIALS}/bob-funds.sk",
-            "vk": f"{CONTAINER_CREDENTIALS}/bob-funds.vk"},
-    "carol": {"sk": f"{CONTAINER_CREDENTIALS}/carol-funds.sk",
-              "vk": f"{CONTAINER_CREDENTIALS}/carol-funds.vk"},
-}
+# ---------------------------------------------------------------- head parameters
 
-# Host-side copies of the same keys (for PyCardano signing of in-head txs).
-HOST_CREDENTIALS = DEMO_DIR / "devnet" / "credentials"
+# Contestation period (seconds). Protocol parameter: ALL participants must
+# configure the same value or Init is ignored. <30s risks an unclosable head
+# (Close validity expires inside one block); mainnet guidance is >= 43200.
+CONTESTATION_PERIOD = int(os.environ.get(
+    "HYDRA_OPS_CONTESTATION_PERIOD",
+    "3" if NETWORK_NAME == "devnet" else "60" if not IS_MAINNET else "43200",
+))
+DEPOSIT_PERIOD = int(os.environ.get(
+    "HYDRA_OPS_DEPOSIT_PERIOD",
+    "10" if NETWORK_NAME == "devnet" else "600",
+))
 
-# Below the L1 min-UTXO (~0.857 ADA with default params), an in-head output
-# can never be fanned out — it would wedge the head. Enforce 1 ADA.
+# Recommended fuel for the node's internal wallet (docs suggest ~30 ada).
+FUEL_THRESHOLD_LOVELACE = 30_000_000
+
+# ---------------------------------------------------------------- participants
+
+def _devnet_parties() -> dict:
+    creds = DEMO_DIR / "devnet" / "credentials"
+    return {
+        name: {
+            "funds_sk": str(creds / f"{name}-funds.sk"),
+            "funds_vk": str(creds / f"{name}-funds.vk"),
+            "fuel_sk": str(creds / f"{name}.sk"),
+            "fuel_vk": str(creds / f"{name}.vk"),
+            "hydra_sk": None,  # devnet hydra keys live inside the compose setup
+            "hydra_vk": None,
+            "ours": True,
+        }
+        for name in ("alice", "bob", "carol")
+    }
+
+
+def _workspace_parties() -> dict:
+    """Parties provisioned into the workspace by generate_keys."""
+    registry = WORKSPACE / "parties.json"
+    if registry.exists():
+        return json.loads(registry.read_text())
+    return {}
+
+
+PARTIES = _devnet_parties() if NETWORK_NAME == "devnet" else _workspace_parties()
+
+
+def save_parties(parties: dict) -> None:
+    """Persist the workspace party registry (non-devnet networks only)."""
+    WORKSPACE.mkdir(parents=True, exist_ok=True)
+    (WORKSPACE / "parties.json").write_text(json.dumps(parties, indent=2))
+
+
+def reload_parties() -> dict:
+    global PARTIES
+    if NETWORK_NAME != "devnet":
+        PARTIES = _workspace_parties()
+    return PARTIES
+
+
+# ---------------------------------------------------------------- nodes
+
+def _default_nodes() -> dict:
+    if NETWORK_NAME == "devnet":
+        return {
+            1: {"ws": "ws://127.0.0.1:4001", "http": "http://127.0.0.1:4001",
+                "name": "alice", "metrics": None},
+            2: {"ws": "ws://127.0.0.1:4002", "http": "http://127.0.0.1:4002",
+                "name": "bob", "metrics": None},
+            3: {"ws": "ws://127.0.0.1:4003", "http": "http://127.0.0.1:4003",
+                "name": "carol", "metrics": None},
+        }
+    registry = WORKSPACE / "nodes.json"
+    if registry.exists():
+        return {int(k): v for k, v in json.loads(registry.read_text()).items()}
+    return {}
+
+
+NODES = _default_nodes()
+
+
+def save_nodes(nodes: dict) -> None:
+    WORKSPACE.mkdir(parents=True, exist_ok=True)
+    (WORKSPACE / "nodes.json").write_text(
+        json.dumps({str(k): v for k, v in nodes.items()}, indent=2))
+
+
+def reload_nodes() -> dict:
+    global NODES
+    NODES = _default_nodes()
+    return NODES
+
+
+# ---------------------------------------------------------------- safety floors
+
+# Head outputs below the L1 min-UTXO can never be fanned out. On devnet the
+# live params are zeroed so we keep the proven 1 ADA floor; on real networks
+# tools derive the floor from live utxoCostPerByte at call time and this
+# value is the fallback.
 MIN_OUTPUT_LOVELACE = 1_000_000

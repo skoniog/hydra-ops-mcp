@@ -62,7 +62,7 @@ def commit_funds(party: str = "alice", node: int = 1, utxo_ref: str = "",
     try:
         client = get_client(node)
         draft = client.draft_commit({ref: {"address": out["address"], "value": out["value"]}})
-        cardano.sign_and_submit(draft, party, f"commit-{party}")
+        cardano.sign_and_submit(draft, party, wallet="funds")
         # Wait for the deposit to be absorbed (deposit period ~10s on the demo).
         before = len(client.get_utxos())
         for _ in range(60):

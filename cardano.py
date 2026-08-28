@@ -1,73 +1,68 @@
-"""L1 operations via cardano-cli inside the devnet's cardano-node container.
+"""L1 helpers, provider-backed.
 
-Address derivation, UTXO queries, chain tip, and the sign-and-submit step of
-the deposit (commit) flow. The container is where the credentials and the
-node socket already live, so L1 work happens there rather than on the host.
+v1 shelled into the devnet container directly; v2 routes everything through
+the configured L1 provider (docker / cli / blockfrost) and keeps this module
+as the stable API the tools import. Address derivation is done locally with
+PyCardano from verification-key files, so it works identically under every
+provider.
 """
 
-import json
-import subprocess
+from pathlib import Path
 
-from config import DEMO_DIR, FUNDS_KEYS, NETWORK_MAGIC
+from pycardano import Address, Network, PaymentVerificationKey
+
+import config
+from providers import get_provider
 
 
 class CardanoError(Exception):
     pass
 
 
-def ccli(*args) -> str:
-    cmd = ["docker", "compose", "exec", "-T", "cardano-node", "cardano-cli", *args]
-    r = subprocess.run(cmd, cwd=DEMO_DIR, capture_output=True, text=True)
-    if r.returncode != 0:
-        raise CardanoError(f"cardano-cli failed: {r.stderr[:600]}")
-    return r.stdout
+_pyc_network = Network.MAINNET if config.IS_MAINNET else Network.TESTNET
 
 
-def party_address(party: str) -> str:
-    if party not in FUNDS_KEYS:
-        raise CardanoError(f"unknown party {party!r}; expected one of {sorted(FUNDS_KEYS)}")
-    return ccli(
-        "conway", "address", "build",
-        "--payment-verification-key-file", FUNDS_KEYS[party]["vk"],
-        "--testnet-magic", str(NETWORK_MAGIC),
-    ).strip()
+def address_for_vk_file(vk_path: str) -> str:
+    vk = PaymentVerificationKey.load(str(vk_path))
+    return str(Address(payment_part=vk.hash(), network=_pyc_network))
 
 
-def l1_utxos(party: str) -> dict:
-    addr = party_address(party)
-    out = ccli(
-        "conway", "query", "utxo", "--address", addr,
-        "--testnet-magic", str(NETWORK_MAGIC),
-        "--socket-path", "/devnet/node.socket",
-        "--out-file", "/dev/stdout",
-    )
-    return json.loads(out)
+def _party(party: str) -> dict:
+    parties = config.reload_parties()
+    if party not in parties:
+        raise CardanoError(
+            f"unknown party {party!r}; known: {sorted(parties) or '(none — run generate_keys)'}")
+    return parties[party]
+
+
+def party_address(party: str, wallet: str = "funds") -> str:
+    """A party's L1 address. wallet is 'funds' (committable) or 'fuel'
+    (the node's internal wallet paying protocol fees)."""
+    info = _party(party)
+    vk = info.get(f"{wallet}_vk")
+    if not vk or not Path(vk).exists():
+        raise CardanoError(f"no {wallet} verification key on disk for {party}")
+    return address_for_vk_file(vk)
+
+
+def l1_utxos(party: str, wallet: str = "funds") -> dict:
+    return get_provider().address_utxos(party_address(party, wallet))
 
 
 def chain_tip() -> dict:
-    out = ccli(
-        "conway", "query", "tip",
-        "--testnet-magic", str(NETWORK_MAGIC),
-        "--socket-path", "/devnet/node.socket",
-    )
-    return json.loads(out)
+    return get_provider().tip()
 
 
-def sign_and_submit(draft_tx: dict, party: str, label: str) -> None:
-    """Write a draft tx into the devnet dir, sign with the party's funds key,
-    and submit it to the L1 — the second half of the deposit (commit) flow."""
-    tx_path = DEMO_DIR / "devnet" / f"ops-{label}.json"
-    tx_path.write_text(json.dumps(draft_tx))
-    ccli(
-        "conway", "transaction", "sign",
-        "--tx-file", f"/devnet/ops-{label}.json",
-        "--signing-key-file", FUNDS_KEYS[party]["sk"],
-        "--out-file", f"/devnet/ops-{label}.signed",
-        "--testnet-magic", str(NETWORK_MAGIC),
-    )
-    ccli(
-        "conway", "transaction", "submit",
-        "--tx-file", f"/devnet/ops-{label}.signed",
-        "--testnet-magic", str(NETWORK_MAGIC),
-        "--socket-path", "/devnet/node.socket",
-    )
+def protocol_parameters() -> dict:
+    return get_provider().protocol_parameters()
+
+
+def sign_and_submit(draft_envelope: dict, party: str, wallet: str = "funds") -> str:
+    """Sign a draft tx with the party's key and submit to L1; returns tx id."""
+    info = _party(party)
+    sk = info.get(f"{wallet}_sk")
+    if not sk:
+        raise CardanoError(f"we do not hold {party}'s {wallet} signing key")
+    provider = get_provider()
+    signed = provider.sign_tx(draft_envelope, sk)
+    return provider.submit_tx(signed)
