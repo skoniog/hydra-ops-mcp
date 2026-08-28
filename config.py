@@ -72,6 +72,14 @@ DEPOSIT_PERIOD = int(os.environ.get(
     "10" if NETWORK_NAME == "devnet" else "600",
 ))
 
+# A node that saw no block for this long refuses inputs and stops signing.
+# The node default is CP/2, which on a short testnet CP (60s) sits BELOW
+# real inter-block gaps (~20s avg, spikes past 30s) — the node then rejects
+# inputs at random (RejectedInputBecauseUnsynced). None = node default.
+# Caveat: values above the CP weaken contest safety; fine for testing.
+_unsynced = os.environ.get("HYDRA_OPS_UNSYNCED_PERIOD")
+UNSYNCED_PERIOD = int(_unsynced) if _unsynced else None
+
 # Recommended fuel for the node's internal wallet (docs suggest ~30 ada).
 FUEL_THRESHOLD_LOVELACE = 30_000_000
 

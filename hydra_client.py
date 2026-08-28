@@ -109,8 +109,18 @@ class HydraClient:
             return {"response": r.text[:400]}
 
     def recover_deposit(self, tx_id: str) -> dict:
-        """DELETE /commits/{txid} — recover a stuck deposit back to L1."""
-        r = httpx.delete(f"{self.http_url}/commits/{tx_id}", timeout=60.0)
+        """DELETE /commits/{txid} — recover a stuck deposit back to L1.
+
+        The node performs the L1 recovery inside this request, which on a
+        real network can outlast any sane HTTP timeout — treat a timeout as
+        'requested' and let the caller verify via pending_deposits/l1_funds.
+        """
+        try:
+            r = httpx.delete(f"{self.http_url}/commits/{tx_id}", timeout=180.0)
+        except httpx.TimeoutException:
+            return {"requested": True,
+                    "note": "recovery request accepted but still in flight; "
+                            "verify via pending_deposits and the L1 balance"}
         if r.status_code != 200:
             raise HydraClientError(f"recover failed: {r.status_code} {r.text[:400]}")
         try:
@@ -189,7 +199,9 @@ class HydraClient:
                 "contestation_deadline": deadline,
                 "seconds_remaining": remaining}
 
-    def decommit(self, tx_envelope: dict, timeout: float = 120.0) -> dict:
+    def decommit(self, tx_envelope: dict, timeout: float = 600.0) -> dict:
+        # DecommitFinalized arrives only after the L1 decrement settles —
+        # several blocks on a real network, so the window must be generous.
         return self._call(
             self._command_and_wait(
                 {"tag": "Decommit", "decommitTx": tx_envelope},
@@ -293,10 +305,11 @@ class HydraClient:
     def _is_rejection(event: dict) -> bool:
         # CommandFailed carries a tag; an input the node cannot even parse
         # (e.g. a command this node version does not know) comes back as a
-        # bare {"input": ..., "reason": ...} with NO tag field.
-        return event.get("tag") in ("CommandFailed", "InvalidInput") or (
-            event.get("tag") is None and "reason" in event
-        )
+        # bare {"input": ..., "reason": ...} with NO tag field. A node that
+        # thinks it is behind the chain answers RejectedInputBecauseUnsynced.
+        return event.get("tag") in (
+            "CommandFailed", "InvalidInput", "RejectedInputBecauseUnsynced"
+        ) or (event.get("tag") is None and "reason" in event)
 
     async def _command_and_wait(self, command: dict, ok_tags: set) -> dict:
         marker = len(self._events)
@@ -312,6 +325,14 @@ class HydraClient:
             await self._event_cond.wait_for(lambda: _resolved(self._events[marker:]) is not None)
             event = _resolved(self._events[marker:])
         if self._is_rejection(event):
+            if event.get("tag") == "RejectedInputBecauseUnsynced":
+                raise HydraClientError(
+                    f"node rejected the input as UNSYNCED (drift "
+                    f"{event.get('drift')}s): it has not seen a block within "
+                    f"its --unsynced-period. On short contestation periods "
+                    f"the default (CP/2) is below real inter-block gaps — "
+                    f"raise HYDRA_OPS_UNSYNCED_PERIOD or the CP, or retry "
+                    f"after the next block")
             reason = event.get("reason") or json.dumps(event)[:400]
             raise HydraClientError(f"command rejected: {str(reason)[:400]}")
         return event

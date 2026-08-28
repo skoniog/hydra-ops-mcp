@@ -119,7 +119,21 @@ def generate_party_keys(party: str, overwrite: bool = False) -> dict:
 # outputs (docs faqs.md; the H39 failure class).
 def build_head_protocol_parameters() -> Path:
     params = dict(get_provider().protocol_parameters())
-    params.pop("_blockfrost_raw", None)
+    from_blockfrost = params.pop("_blockfrost_raw", None) is not None
+    if from_blockfrost:
+        # The node requires the COMPLETE cardano-cli parameter shape
+        # (maxBlockBodySize, cost models, governance params, ...). Blockfrost
+        # covers the consensus-relevant fields; take the full structure from
+        # the hydra repo's template and overlay every live value we have.
+        template_path = (config.HYDRA_REPO / "hydra-cluster" / "config"
+                         / "protocol-parameters.json")
+        if not template_path.exists():
+            raise NodeManagerError(
+                f"parameter template not found at {template_path}; a full "
+                f"cardano-cli-shaped file is required for blockfrost mode")
+        template = json.loads(template_path.read_text())
+        template.update(params)
+        params = template
     params["txFeeFixed"] = 0
     params["txFeePerByte"] = 0
     if isinstance(params.get("executionUnitPrices"), dict):
@@ -230,6 +244,8 @@ def plan_node(party: str, peers: list, api_port: int, listen_port: int,
         # unstable builds sit inactive for an hour regardless of the period.
         *(["--deposit-activation", f"{config.DEPOSIT_PERIOD}s"]
           if _image_supports("--deposit-activation") else []),
+        *(["--unsynced-period", f"{config.UNSYNCED_PERIOD}s"]
+          if config.UNSYNCED_PERIOD else []),
         "--api-host", "0.0.0.0", "--api-port", str(api_port),
         "--listen", f"0.0.0.0:{listen_port}",
         "--advertise", f"{advertise_host}:{listen_port}",

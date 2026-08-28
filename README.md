@@ -407,9 +407,30 @@ the version gap precisely; against `HYDRA_NODE_IMAGE=…:unstable` the full
 selective-drain flow is verified working (see Provisioning above), which
 also requires publishing that build's own scripts.
 
-**Blockfrost paths are built to the same provider contract but have not run
-against a live network yet** — that needs a Blockfrost project id and
-faucet tADA. Everything else here is verified on the devnet.
+**Verified on preview, end to end, over Blockfrost** — no cardano-node
+anywhere: two parties provisioned from scratch, faucet-funded, both nodes on
+the `--blockfrost` backend, then init → 10,000 tADA deposit → in-head
+payments (**0.2 s finality**) → decommit (funds verified back on L1 with the
+head open) → close (~3 min, the automatic close-retry fired and recovered a
+dropped Close) → 60 s contestation → fanout (~3 min) → final L1 balances
+exact to the lovelace.
+
+Real-network operating notes learned from that run:
+
+- **`--unsynced-period` defaults to CP/2**, which on a short testnet CP
+  (60 s) sits below preview's real inter-block gaps — the node then randomly
+  rejects inputs with `RejectedInputBecauseUnsynced`. Set
+  `HYDRA_OPS_UNSYNCED_PERIOD` (e.g. 600) for short-CP testing; on proper CPs
+  the default is fine.
+- **A 60 s deposit period is too tight on preview** — the 3×DP deadline
+  expires before absorption can settle and the deposit lapses
+  (`DepositExpired`; `recover_deposit` gets the funds back, verified live).
+  DP=180 absorbed reliably in ~6 min.
+- **Right after absorption there is a brief settling window** where spending
+  the deposited UTXO is rejected with "all inputs are spent"; retry moments
+  later succeeds.
+- L1-touching operations take minutes, not seconds: budget ~2–4 min each for
+  close, decommit settlement, and fanout at preview block times.
 
 **Devnet keys for alice/bob/carol come from the demo directory**; provisioned
 parties keep their keys in the workspace, `chmod 600`, and tools never return

@@ -88,11 +88,22 @@ class BlockfrostProvider(L1Provider):
             "utxoCostPerByte": int(raw["coins_per_utxo_size"]),
             "maxTxSize": int(raw["max_tx_size"]),
             "maxValueSize": int(raw["max_val_size"]),
+            "maxBlockBodySize": int(raw["max_block_size"]),
+            "maxBlockHeaderSize": int(raw["max_block_header_size"]),
             "collateralPercentage": int(raw["collateral_percent"]),
             "maxCollateralInputs": int(raw["max_collateral_inputs"]),
+            "stakeAddressDeposit": int(raw["key_deposit"]),
+            "stakePoolDeposit": int(raw["pool_deposit"]),
+            "minPoolCost": int(raw["min_pool_cost"]),
+            "protocolVersion": {"major": int(raw["protocol_major_ver"]),
+                                "minor": int(raw["protocol_minor_ver"])},
             "maxTxExecutionUnits": {
                 "memory": int(raw["max_tx_ex_mem"]),
                 "steps": int(raw["max_tx_ex_steps"]),
+            },
+            "maxBlockExecutionUnits": {
+                "memory": int(raw["max_block_ex_mem"]),
+                "steps": int(raw["max_block_ex_steps"]),
             },
             "executionUnitPrices": {
                 "priceMemory": float(raw["price_mem"]),
@@ -100,13 +111,17 @@ class BlockfrostProvider(L1Provider):
             },
             "_blockfrost_raw": raw,
         }
+        if raw.get("min_fee_ref_script_cost_per_byte") is not None:
+            mapped["minFeeRefScriptCostPerByte"] = int(
+                float(raw["min_fee_ref_script_cost_per_byte"]))
         if raw.get("cost_models_raw"):
             mapped["costModels"] = raw["cost_models_raw"]
         return mapped
 
     def tip(self) -> dict:
         d = self._get("/blocks/latest")
-        return {"slot": d.get("slot"), "block": d.get("height"), "hash": d.get("hash")}
+        return {"slot": d.get("slot"), "block": d.get("height"),
+                "hash": d.get("hash"), "time": d.get("time")}
 
     def sign_tx(self, draft_envelope: dict, signing_key_path: str) -> dict:
         # Local signing that never re-serializes the draft body — see

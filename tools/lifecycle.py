@@ -63,9 +63,12 @@ def commit_funds(party: str = "alice", node: int = 1, utxo_ref: str = "",
         client = get_client(node)
         draft = client.draft_commit({ref: {"address": out["address"], "value": out["value"]}})
         cardano.sign_and_submit(draft, party, wallet="funds")
-        # Wait for the deposit to be absorbed (deposit period ~10s on the demo).
+        # Wait for absorption: 2.3.0 absorbs between DP and 3×DP after the
+        # deposit lands, plus L1 block latency — wait past that ceiling.
+        import config as _config
+        budget = max(180, 3 * _config.DEPOSIT_PERIOD + 120)
         before = len(client.get_utxos())
-        for _ in range(60):
+        for _ in range(budget // 3):
             if len(client.get_utxos()) > before:
                 break
             time.sleep(3)

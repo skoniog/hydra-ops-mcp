@@ -41,23 +41,35 @@ def preflight(node: int = 1) -> dict:
             checks.append(_check("api", "fail",
                                  f"{entry['http']} unreachable: {type(e).__name__}"))
 
-    # 2. Chain liveness: the tip must advance between two samples. A node
-    #    unsynced for CP/2 stops signing snapshots, and a stalled chain is
-    #    this devnet's classic wedge.
+    # 2. Chain liveness. When the tip carries a block timestamp (Blockfrost),
+    #    judge by recency — real networks produce blocks ~20s apart, so a
+    #    short two-sample window would always look stalled. Otherwise (devnet,
+    #    1s slots) sample the slot twice.
     try:
         provider = get_provider()
-        slot_a = provider.tip().get("slot")
-        time.sleep(3)
-        slot_b = provider.tip().get("slot")
-        if slot_a is None:
-            checks.append(_check("chain", "fail", "no tip from the L1 provider"))
-        elif slot_b > slot_a:
-            checks.append(_check("chain", "pass",
-                                 f"tip advancing (slot {slot_a} -> {slot_b})"))
+        tip = provider.tip()
+        if tip.get("time"):
+            age = time.time() - tip["time"]
+            if age < 300:
+                checks.append(_check("chain", "pass",
+                                     f"latest block {age:.0f}s old (slot {tip['slot']})"))
+            else:
+                checks.append(_check("chain", "fail",
+                                     f"latest block is {age:.0f}s old — chain "
+                                     f"stalled or provider far behind"))
         else:
-            checks.append(_check("chain", "fail",
-                                 f"tip NOT advancing (slot {slot_a}); a node "
-                                 f"unsynced for CP/2 stops signing snapshots"))
+            slot_a = tip.get("slot")
+            time.sleep(3)
+            slot_b = provider.tip().get("slot")
+            if slot_a is None:
+                checks.append(_check("chain", "fail", "no tip from the L1 provider"))
+            elif slot_b > slot_a:
+                checks.append(_check("chain", "pass",
+                                     f"tip advancing (slot {slot_a} -> {slot_b})"))
+            else:
+                checks.append(_check("chain", "fail",
+                                     f"tip NOT advancing (slot {slot_a}); a node "
+                                     f"unsynced for CP/2 stops signing snapshots"))
     except Exception as e:
         checks.append(_check("chain", "fail", f"tip query failed: {e}"))
 
