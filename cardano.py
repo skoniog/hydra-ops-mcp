@@ -57,12 +57,19 @@ def protocol_parameters() -> dict:
     return get_provider().protocol_parameters()
 
 
+def sign_envelope(draft_envelope: dict, signing_key_path: str) -> dict:
+    """Append our vkey witness to a draft tx, locally — works for keys
+    anywhere on the host, under every provider. See tx_builder.sign_envelope
+    for why this must not re-serialize the body."""
+    import tx_builder
+    return tx_builder.sign_envelope(draft_envelope, signing_key_path)
+
+
 def sign_and_submit(draft_envelope: dict, party: str, wallet: str = "funds") -> str:
     """Sign a draft tx with the party's key and submit to L1; returns tx id."""
     info = _party(party)
     sk = info.get(f"{wallet}_sk")
     if not sk:
         raise CardanoError(f"we do not hold {party}'s {wallet} signing key")
-    provider = get_provider()
-    signed = provider.sign_tx(draft_envelope, sk)
-    return provider.submit_tx(signed)
+    signed = sign_envelope(draft_envelope, sk)
+    return get_provider().submit_tx(signed)

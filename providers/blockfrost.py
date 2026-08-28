@@ -109,23 +109,10 @@ class BlockfrostProvider(L1Provider):
         return {"slot": d.get("slot"), "block": d.get("height"), "hash": d.get("hash")}
 
     def sign_tx(self, draft_envelope: dict, signing_key_path: str) -> dict:
-        # Local signing with PyCardano: append our vkey witness to the draft.
-        from pycardano import (PaymentSigningKey, PaymentVerificationKey,
-                               Transaction, VerificationKeyWitness)
-
-        sk = PaymentSigningKey.load(signing_key_path)
-        tx = Transaction.from_cbor(draft_envelope["cborHex"])
-        witness = VerificationKeyWitness(
-            PaymentVerificationKey.from_signing_key(sk),
-            sk.sign(tx.transaction_body.hash()),
-        )
-        existing = tx.transaction_witness_set.vkey_witnesses or []
-        tx.transaction_witness_set.vkey_witnesses = list(existing) + [witness]
-        return {
-            "type": draft_envelope.get("type", "Tx ConwayEra"),
-            "description": "",
-            "cborHex": tx.to_cbor_hex(),
-        }
+        # Local signing that never re-serializes the draft body — see
+        # tx_builder.sign_envelope for the InvalidWitnessesUTXOW trap.
+        import tx_builder
+        return tx_builder.sign_envelope(draft_envelope, signing_key_path)
 
     def submit_tx(self, tx_envelope: dict) -> str:
         cbor = bytes.fromhex(tx_envelope["cborHex"])

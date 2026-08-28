@@ -7,7 +7,7 @@ changes nothing. Run with `python server.py` or `fastmcp dev server.py`.
 
 from fastmcp import FastMCP
 
-from tools import diagnose, lifecycle, observe, provision, transact
+from tools import diagnose, lifecycle, observe, preflight as preflight_mod, provision, transact
 
 mcp = FastMCP("hydra-ops")
 
@@ -185,6 +185,26 @@ def node_logs(node: int = 1, pattern: str = "", since: str = "10m",
 def explain_error(code: str) -> dict:
     """Decode a Hydra on-chain error code (e.g. H39) from the Plutus source."""
     return diagnose.explain_error(code)
+
+
+@mcp.tool
+def sideload_snapshot(from_node: int, to_node: int, confirm: bool = False) -> dict:
+    """Recover a forked head by side-loading one node's confirmed snapshot
+    into a diverged peer. confirm=True to execute."""
+    return lifecycle.sideload_snapshot(from_node, to_node, confirm)
+
+
+@mcp.tool
+def preflight(node: int = 1) -> dict:
+    """Run every operational safety check in one call: API, chain liveness,
+    peers, fuel, contestation-period sanity, head-parameter traps, scripts."""
+    return preflight_mod.preflight(node)
+
+
+@mcp.tool
+def list_parties() -> dict:
+    """Every known party: addresses and whether this server holds their keys."""
+    return preflight_mod.list_parties()
 
 
 if __name__ == "__main__":

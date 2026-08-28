@@ -19,10 +19,19 @@ def node_logs(node: int = 1, pattern: str = "", since: str = "10m",
     `pattern` is a regex applied per line; `since` is a docker duration
     (e.g. 10m, 2h). Lines are truncated to keep responses readable.
     """
-    service = f"hydra-node-{node}"
-    cmd = ["docker", "compose", "logs", service, "--since", since, "--no-log-prefix"]
+    # Provisioned nodes are standalone containers registered with a name;
+    # the devnet trio are compose services.
+    import config
+    entry = config.reload_nodes().get(node) or {}
+    if entry.get("container"):
+        cmd = ["docker", "logs", entry["container"], "--since", since]
+        cwd = None
+    else:
+        cmd = ["docker", "compose", "logs", f"hydra-node-{node}",
+               "--since", since, "--no-log-prefix"]
+        cwd = DEMO_DIR
     try:
-        r = subprocess.run(cmd, cwd=DEMO_DIR, capture_output=True, text=True, timeout=30)
+        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=30)
     except Exception as e:
         return err(str(e), node=node)
     if r.returncode != 0:

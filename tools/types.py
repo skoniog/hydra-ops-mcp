@@ -15,11 +15,14 @@ def err(message: str, **fields) -> dict:
 
 
 def needs_confirmation(action: str, **fields) -> dict:
+    import config
+    prefix = "⚠ MAINNET — real funds. " if config.IS_MAINNET else ""
     return {
         "status": "requires_confirmation",
         "error": None,
         "action": action,
-        "message": f"This would {action}. Nothing has been done. "
+        "network": config.NETWORK_NAME,
+        "message": f"{prefix}This would {action}. Nothing has been done. "
                    f"Retry with confirm=True to execute.",
         **fields,
     }

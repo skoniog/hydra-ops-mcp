@@ -182,6 +182,59 @@ def test_decommit_requires_known_owner():
         raise AssertionError("decommit of an unknown-owner UTXO must fail")
 
 
+def test_sign_envelope_preserves_hashed_bytes():
+    """sign_envelope must never re-serialize the body or aux data: it signs
+    blake2b of the body's exact byte span and stitches original bytes back.
+    Neither PyCardano nor cbor2 round-trips node drafts faithfully."""
+    import cbor2
+    import hashlib
+    import tempfile
+    import tx_builder
+    from pycardano import PaymentSigningKey, PaymentVerificationKey
+
+    with tempfile.TemporaryDirectory() as td:
+        sk = PaymentSigningKey.generate()
+        sk_path = td + "/k.sk"
+        sk.save(sk_path)
+
+        # A synthetic draft with a deliberately NON-canonical body encoding
+        # (indefinite-length map) that cbor2/pycardano would rewrite.
+        body = bytes.fromhex("bf") + cbor2.dumps(0) + cbor2.dumps(
+            [[b"\x01" * 32, 0]]) + cbor2.dumps(1) + cbor2.dumps([]) + \
+            cbor2.dumps(2) + cbor2.dumps(7) + bytes.fromhex("ff")
+        raw = bytes.fromhex("84") + body + cbor2.dumps({}) + \
+            cbor2.dumps(True) + bytes.fromhex("f6")
+        draft = {"type": "Tx ConwayEra", "cborHex": raw.hex()}
+
+        signed = tx_builder.sign_envelope(draft, sk_path)
+        out = bytes.fromhex(signed["cborHex"])
+
+        # Body bytes preserved verbatim.
+        assert body in out, "body was re-serialized"
+        # The witness signs the hash of those exact bytes.
+        decoded = cbor2.loads(out)
+        vk_bytes, sig = decoded[1][0][0]
+        vk = PaymentVerificationKey.from_signing_key(sk)
+        assert vk_bytes == vk.to_primitive()
+        expected = hashlib.blake2b(body, digest_size=32).digest()
+        # Ed25519 verify via pycardano's key object
+        from nacl.signing import VerifyKey
+        VerifyKey(bytes(vk_bytes)).verify(expected, sig)  # raises if invalid
+
+
+def test_scripts_override_beats_devnet_env():
+    """HYDRA_SCRIPTS_TX_ID must override the devnet's published scripts —
+    required to run an unstable image whose validators differ."""
+    import os
+    import node_manager
+
+    os.environ["HYDRA_SCRIPTS_TX_ID"] = "ab" * 32
+    try:
+        assert node_manager._scripts_tx_id() == "ab" * 32
+    finally:
+        del os.environ["HYDRA_SCRIPTS_TX_ID"]
+
+
 def test_server_registers_all_tools():
     import asyncio
     from fastmcp import Client
@@ -198,6 +251,11 @@ def test_server_registers_all_tools():
         "init_head", "commit_funds", "decommit", "close_head",
         "fanout", "partial_fanout", "recover_deposit",
         "send_tx", "node_logs", "explain_error",
+        # v2
+        "generate_keys", "fuel_status", "build_protocol_parameters",
+        "share_peer_info", "node_plan", "start_node", "stop_node",
+        "node_health", "wait_for_event", "sideload_snapshot",
+        "preflight", "list_parties",
     }
     assert expected <= names, f"missing: {expected - names}"
 

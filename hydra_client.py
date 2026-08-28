@@ -92,6 +92,22 @@ class HydraClient:
             raise HydraClientError(f"commit draft failed: {r.status_code} {r.text[:400]}")
         return r.json()
 
+    def get_snapshot(self) -> dict:
+        """The latest confirmed snapshot (GET /snapshot)."""
+        return self._get("/snapshot") or {}
+
+    def sideload_snapshot(self, snapshot: dict) -> dict:
+        """POST /snapshot — side-load a confirmed snapshot to re-align a node
+        whose ledger state diverged (the documented forked-head recovery)."""
+        r = httpx.post(f"{self.http_url}/snapshot", json=snapshot, timeout=120.0)
+        if r.status_code != 200:
+            raise HydraClientError(
+                f"snapshot side-load failed: {r.status_code} {r.text[:400]}")
+        try:
+            return r.json()
+        except ValueError:
+            return {"response": r.text[:400]}
+
     def recover_deposit(self, tx_id: str) -> dict:
         """DELETE /commits/{txid} — recover a stuck deposit back to L1."""
         r = httpx.delete(f"{self.http_url}/commits/{tx_id}", timeout=60.0)
@@ -354,3 +370,16 @@ def get_client(node: int = 1) -> HydraClient:
         client.start()
         _clients[node] = client
     return _clients[node]
+
+
+def drop_client(node: int = None) -> None:
+    """Forget cached client(s) — required after a node restarts, or the
+    cached WebSocket points at a dead container."""
+    targets = [node] if node is not None else list(_clients)
+    for n in targets:
+        client = _clients.pop(n, None)
+        if client is not None:
+            try:
+                client.stop()
+            except Exception:
+                pass

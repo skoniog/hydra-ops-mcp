@@ -52,6 +52,19 @@ def _uid_gid() -> str:
     return f"{os.getuid()}:{os.getgid()}"
 
 
+_image_help_cache: dict = {}
+
+
+def _image_supports(flag: str) -> bool:
+    """Whether the configured node image's CLI knows a flag (cached probe)."""
+    image = config.HYDRA_NODE_IMAGE
+    if image not in _image_help_cache:
+        r = subprocess.run(["docker", "run", "--rm", image, "--", "--help"],
+                           capture_output=True, text=True, timeout=120)
+        _image_help_cache[image] = r.stdout + r.stderr
+    return flag in _image_help_cache[image]
+
+
 # ------------------------------------------------------------------ keys
 
 def generate_party_keys(party: str, overwrite: bool = False) -> dict:
@@ -162,16 +175,19 @@ def _write_peer_keys(peers: list) -> list:
 # ------------------------------------------------------------------ node planning
 
 def _scripts_tx_id() -> str:
+    # An explicit override always wins — required whenever the node image
+    # doesn't match the published scripts (e.g. an `unstable` build, whose
+    # validators differ from the release the network's scripts came from).
+    import os
+    override = os.environ.get("HYDRA_SCRIPTS_TX_ID")
+    if override:
+        return override
     if config.NETWORK_NAME == "devnet":
         env = (config.DEMO_DIR / ".env").read_text()
         m = re.search(r"HYDRA_SCRIPTS_TX_ID=([0-9a-f,]+)", env)
         if not m:
             raise NodeManagerError("devnet scripts not published — run reset_devnet.sh")
         return m.group(1)
-    import os
-    override = os.environ.get("HYDRA_SCRIPTS_TX_ID")
-    if override:
-        return override
     ids = networks.script_tx_ids(config.NETWORK_NAME, config.HYDRA_NODE_VERSION)
     if not ids:
         raise NodeManagerError(
@@ -209,6 +225,11 @@ def plan_node(party: str, peers: list, api_port: int, listen_port: int,
         "--ledger-protocol-parameters", _to_container(str(params_file)),
         "--contestation-period", f"{config.CONTESTATION_PERIOD}s",
         "--deposit-period", f"{config.DEPOSIT_PERIOD}s",
+        # master split absorption timing out of deposit-period into
+        # --deposit-activation (default 3600s!); without this, deposits on
+        # unstable builds sit inactive for an hour regardless of the period.
+        *(["--deposit-activation", f"{config.DEPOSIT_PERIOD}s"]
+          if _image_supports("--deposit-activation") else []),
         "--api-host", "0.0.0.0", "--api-port", str(api_port),
         "--listen", f"0.0.0.0:{listen_port}",
         "--advertise", f"{advertise_host}:{listen_port}",
@@ -285,8 +306,10 @@ def start(plan: dict) -> dict:
             cwd=config.DEMO_DIR, capture_output=True, text=True,
         )
     _run(plan["command"], timeout=300)
+    import hydra_client
     nodes = config.reload_nodes()
     index = max(nodes, default=100) + 1
+    hydra_client.drop_client(index)  # a stale client may exist for a reused index
     nodes[index] = {
         "ws": f"ws://127.0.0.1:{plan['api_port']}",
         "http": f"http://127.0.0.1:{plan['api_port']}",
@@ -303,6 +326,10 @@ def stop(party: str, remove: bool = True) -> None:
     subprocess.run(["docker", "stop", name], capture_output=True, text=True)
     if remove:
         subprocess.run(["docker", "rm", name], capture_output=True, text=True)
+    import hydra_client
+    for index, entry in config.reload_nodes().items():
+        if entry.get("container") == name:
+            hydra_client.drop_client(index)
     nodes = {k: v for k, v in config.reload_nodes().items()
              if v.get("container") != name}
     config.save_nodes(nodes)

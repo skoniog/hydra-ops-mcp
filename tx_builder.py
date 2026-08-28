@@ -156,6 +156,109 @@ def build_decommit(utxos: dict, utxo_ref: str) -> tuple:
     return envelope, tx_id, owner, lovelace
 
 
+def _cbor_skip(data: bytes, offset: int) -> int:
+    """Return the offset just past the CBOR item starting at `offset`."""
+    initial = data[offset]
+    major, info = initial >> 5, initial & 0x1F
+    offset += 1
+
+    if info < 24:
+        arg = info
+    elif info == 24:
+        arg = data[offset]; offset += 1
+    elif info == 25:
+        arg = int.from_bytes(data[offset:offset + 2]); offset += 2
+    elif info == 26:
+        arg = int.from_bytes(data[offset:offset + 4]); offset += 4
+    elif info == 27:
+        arg = int.from_bytes(data[offset:offset + 8]); offset += 8
+    elif info == 31:
+        arg = None  # indefinite length
+    else:
+        raise TxBuildError(f"malformed CBOR at {offset - 1}")
+
+    if major in (0, 1, 7):        # ints / simple / floats: no payload beyond arg
+        return offset
+    if major in (2, 3):           # byte/text string
+        if arg is None:           # indefinite: chunks until break
+            while data[offset] != 0xFF:
+                offset = _cbor_skip(data, offset)
+            return offset + 1
+        return offset + arg
+    if major == 4:                # array
+        if arg is None:
+            while data[offset] != 0xFF:
+                offset = _cbor_skip(data, offset)
+            return offset + 1
+        for _ in range(arg):
+            offset = _cbor_skip(data, offset)
+        return offset
+    if major == 5:                # map
+        if arg is None:
+            while data[offset] != 0xFF:
+                offset = _cbor_skip(data, offset)
+                offset = _cbor_skip(data, offset)
+            return offset + 1
+        for _ in range(arg * 2):
+            offset = _cbor_skip(data, offset)
+        return offset
+    if major == 6:                # tag
+        return _cbor_skip(data, offset)
+    raise TxBuildError("unreachable CBOR major type")
+
+
+def sign_envelope(draft_envelope: dict, signing_key_path: str) -> dict:
+    """Append our vkey witness to a draft TextEnvelope tx WITHOUT
+    re-serializing anything the ledger hashes.
+
+    Neither PyCardano nor cbor2 round-trips node-built drafts byte-exactly,
+    and a re-serialized body means the signature is over the wrong hash
+    (InvalidWitnessesUTXOW). So: locate the exact byte spans of the tx's
+    four parts with a CBOR scanner, sign blake2b-256 of the body span as-is,
+    re-encode only the witness set (its encoding is not committed to
+    anywhere for plain-payment deposits), and stitch the original bytes back
+    together around it.
+    """
+    import cbor2
+    import hashlib
+
+    sk = PaymentSigningKey.load(signing_key_path)
+    vk = PaymentVerificationKey.from_signing_key(sk)
+
+    raw = bytes.fromhex(draft_envelope["cborHex"])
+    if raw[0] != 0x84:
+        raise TxBuildError("expected a 4-element transaction array")
+    body_start = 1
+    body_end = _cbor_skip(raw, body_start)
+    ws_end = _cbor_skip(raw, body_end)
+    valid_end = _cbor_skip(raw, ws_end)
+    aux_end = _cbor_skip(raw, valid_end)
+    if aux_end != len(raw):
+        raise TxBuildError("trailing bytes after transaction")
+
+    body_bytes = raw[body_start:body_end]
+    body_hash = hashlib.blake2b(body_bytes, digest_size=32).digest()
+    witness = [vk.to_primitive(), sk.sign(body_hash)]
+
+    ws = cbor2.loads(raw[body_end:ws_end])
+    if not isinstance(ws, dict):
+        ws = {}
+    existing = ws.get(0)
+    if existing is None:
+        ws[0] = [witness]
+    elif isinstance(existing, cbor2.CBORTag):  # Conway set tag (258)
+        ws[0] = cbor2.CBORTag(existing.tag, list(existing.value) + [witness])
+    else:
+        ws[0] = list(existing) + [witness]
+
+    stitched = (raw[:body_end] + cbor2.dumps(ws) + raw[ws_end:])
+    return {
+        "type": draft_envelope.get("type", "Tx ConwayEra"),
+        "description": "",
+        "cborHex": stitched.hex(),
+    }
+
+
 def min_output_lovelace(l1_params: dict | None) -> int:
     """The floor below which a head output can never be fanned out to L1.
 

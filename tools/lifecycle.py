@@ -159,6 +159,36 @@ def fanout(node: int = 1, confirm: bool = False) -> dict:
               finalized_utxo_count=len(event.get("finalizedUTxO") or {}))
 
 
+def sideload_snapshot(from_node: int, to_node: int, confirm: bool = False) -> dict:
+    """Recover a forked head: fetch the confirmed snapshot from one node and
+    side-load it into another whose ledger state diverged.
+
+    This is the documented recovery when peers stop signing snapshots because
+    their local states disagree. All peers must converge on the same snapshot;
+    run this toward each diverged node.
+    """
+    try:
+        snapshot = get_client(from_node).get_snapshot()
+    except Exception as e:
+        return err(f"could not fetch snapshot from node {from_node}: {e}")
+    if not snapshot:
+        return err(f"node {from_node} has no confirmed snapshot to share")
+    number = ((snapshot.get("snapshot") or {}).get("number")
+              if isinstance(snapshot.get("snapshot"), dict) else None)
+    if not confirm:
+        return needs_confirmation(
+            f"side-load node {from_node}'s confirmed snapshot"
+            f"{f' #{number}' if number is not None else ''} into node "
+            f"{to_node}, overriding its local ledger state",
+            from_node=from_node, to_node=to_node, snapshot_number=number)
+    try:
+        result = get_client(to_node).sideload_snapshot(snapshot)
+    except Exception as e:
+        return err(str(e), from_node=from_node, to_node=to_node)
+    return ok("sideloaded", from_node=from_node, to_node=to_node,
+              snapshot_number=number, result=result)
+
+
 def wait_for_event(tags: list, node: int = 1, timeout_seconds: int = 120) -> dict:
     """Block (bounded, max 600s) until the node emits one of the named
     events — for when waiting IS the intent, e.g. ReadyToFanout on a devnet
