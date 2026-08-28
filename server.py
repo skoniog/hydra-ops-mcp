@@ -7,9 +7,66 @@ changes nothing. Run with `python server.py` or `fastmcp dev server.py`.
 
 from fastmcp import FastMCP
 
-from tools import diagnose, lifecycle, observe, transact
+from tools import diagnose, lifecycle, observe, preflight as preflight_mod, provision, transact
 
 mcp = FastMCP("hydra-ops")
+
+
+# --- provisioning (spin up a node, connect to peers) ---
+
+
+@mcp.tool
+def generate_keys(party: str, overwrite: bool = False, confirm: bool = False) -> dict:
+    """Create fuel + funds + Hydra key pairs for a party. confirm=True to execute."""
+    return provision.generate_keys(party, overwrite, confirm)
+
+
+@mcp.tool
+def fuel_status(party: str) -> dict:
+    """The party's node-wallet (fuel) address and balance, and whether it can operate."""
+    return provision.fuel_status(party)
+
+
+@mcp.tool
+def build_protocol_parameters(confirm: bool = False) -> dict:
+    """Write the head ledger parameters from live network values, zeroing only fees."""
+    return provision.build_protocol_parameters(confirm)
+
+
+@mcp.tool
+def share_peer_info(party: str, host: str, port: int = 5001) -> dict:
+    """Emit what a counterparty needs to add this party as a peer."""
+    return provision.share_peer_info(party, host, port)
+
+
+@mcp.tool
+def node_plan(party: str, peers: list = None, api_port: int = 4101,
+              listen_port: int = 5101, metrics_port: int = 6101,
+              advertise_host: str = "127.0.0.1") -> dict:
+    """Preview the exact hydra-node container command that would run. Read-only."""
+    return provision.node_plan(party, peers, api_port, listen_port,
+                               metrics_port, advertise_host)
+
+
+@mcp.tool
+def start_node(party: str, peers: list = None, api_port: int = 4101,
+               listen_port: int = 5101, metrics_port: int = 6101,
+               advertise_host: str = "127.0.0.1", confirm: bool = False) -> dict:
+    """Start this party's hydra-node container. confirm=True to execute."""
+    return provision.start_node(party, peers, api_port, listen_port,
+                                metrics_port, advertise_host, confirm)
+
+
+@mcp.tool
+def stop_node(party: str, confirm: bool = False) -> dict:
+    """Stop and remove this party's node container. confirm=True to execute."""
+    return provision.stop_node(party, confirm)
+
+
+@mcp.tool
+def node_health(node: int = 1) -> dict:
+    """Container, API, head, peer-connectivity and fuel health for one node."""
+    return provision.node_health(node)
 
 
 # --- observability (read-only) ---
@@ -97,6 +154,13 @@ def recover_deposit(tx_id: str, node: int = 1, confirm: bool = False) -> dict:
     return lifecycle.recover_deposit(tx_id, node, confirm)
 
 
+@mcp.tool
+def wait_for_event(tags: list, node: int = 1, timeout_seconds: int = 120) -> dict:
+    """Wait (bounded, max 600s) for one of the named server events, e.g.
+    ReadyToFanout after a short contestation period."""
+    return lifecycle.wait_for_event(tags, node, timeout_seconds)
+
+
 # --- transactions (confirm-gated) ---
 
 
@@ -121,6 +185,26 @@ def node_logs(node: int = 1, pattern: str = "", since: str = "10m",
 def explain_error(code: str) -> dict:
     """Decode a Hydra on-chain error code (e.g. H39) from the Plutus source."""
     return diagnose.explain_error(code)
+
+
+@mcp.tool
+def sideload_snapshot(from_node: int, to_node: int, confirm: bool = False) -> dict:
+    """Recover a forked head by side-loading one node's confirmed snapshot
+    into a diverged peer. confirm=True to execute."""
+    return lifecycle.sideload_snapshot(from_node, to_node, confirm)
+
+
+@mcp.tool
+def preflight(node: int = 1) -> dict:
+    """Run every operational safety check in one call: API, chain liveness,
+    peers, fuel, contestation-period sanity, head-parameter traps, scripts."""
+    return preflight_mod.preflight(node)
+
+
+@mcp.tool
+def list_parties() -> dict:
+    """Every known party: addresses and whether this server holds their keys."""
+    return preflight_mod.list_parties()
 
 
 if __name__ == "__main__":

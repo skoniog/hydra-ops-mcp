@@ -19,6 +19,14 @@ def head_status(node: int = 1) -> dict:
     coordinated = contents.get("coordinatedHeadState") or {}
     confirmed = coordinated.get("confirmedSnapshot") or contents.get("confirmedSnapshot") or {}
     snapshot = confirmed.get("snapshot") or {}
+    extra = {}
+    if head.get("tag") in ("Closed", "FanoutPossible"):
+        try:
+            readiness = client.fanout_readiness()
+            extra["fanout_ready"] = readiness["ready"]
+            extra["seconds_until_fanout"] = readiness.get("seconds_remaining")
+        except Exception:
+            pass
     return ok(
         "ok",
         node=node,
@@ -29,6 +37,7 @@ def head_status(node: int = 1) -> dict:
         snapshot_number=snapshot.get("number"),
         version=coordinated.get("version", contents.get("version")),
         contestation_deadline=contents.get("contestationDeadline"),
+        **extra,
     )
 
 

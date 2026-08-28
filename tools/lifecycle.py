@@ -62,10 +62,13 @@ def commit_funds(party: str = "alice", node: int = 1, utxo_ref: str = "",
     try:
         client = get_client(node)
         draft = client.draft_commit({ref: {"address": out["address"], "value": out["value"]}})
-        cardano.sign_and_submit(draft, party, f"commit-{party}")
-        # Wait for the deposit to be absorbed (deposit period ~10s on the demo).
+        cardano.sign_and_submit(draft, party, wallet="funds")
+        # Wait for absorption: 2.3.0 absorbs between DP and 3×DP after the
+        # deposit lands, plus L1 block latency — wait past that ceiling.
+        import config as _config
+        budget = max(180, 3 * _config.DEPOSIT_PERIOD + 120)
         before = len(client.get_utxos())
-        for _ in range(60):
+        for _ in range(budget // 3):
             if len(client.get_utxos()) > before:
                 break
             time.sleep(3)
@@ -101,22 +104,52 @@ def decommit(utxo_ref: str, node: int = 1, confirm: bool = False) -> dict:
 
 
 def close_head(node: int = 1, confirm: bool = False) -> dict:
-    """Close the head — for ALL participants. Irreversible."""
+    """Close the head — for ALL participants. Irreversible.
+
+    Returns as soon as the Close is observed on-chain; it does NOT wait for
+    the contestation deadline (hours on real networks). Fanout becomes
+    possible only after the returned deadline; check with fanout or
+    head_status. Retries a dropped Close automatically (issue #1039).
+    """
+    import config as _config
     if not confirm:
+        cp = _config.CONTESTATION_PERIOD
         return needs_confirmation(
-            f"CLOSE the head via node {node}. This ends the head for every "
-            f"participant; after the contestation deadline it must be fanned out",
-            node=node)
+            f"CLOSE the head via node {node} on {_config.NETWORK_NAME}. This "
+            f"ends the head for every participant; funds stay locked until "
+            f"fanout, possible only after the ~{cp}s contestation deadline "
+            f"(worst case (1+n)×{cp}s if contested)", node=node)
     try:
         event = get_client(node).close_head()
+        readiness = get_client(node).fanout_readiness()
     except Exception as e:
         return err(str(e), node=node)
     return ok("closed", node=node,
-              contestation_deadline=event.get("contestationDeadline"))
+              contestation_deadline=event.get("contestationDeadline"),
+              seconds_until_fanout=readiness.get("seconds_remaining"),
+              next_step="call fanout once the deadline passes; head_status "
+                        "shows the remaining wait")
 
 
 def fanout(node: int = 1, confirm: bool = False) -> dict:
-    """Distribute the closed head's entire UTXO set back to the L1."""
+    """Distribute the closed head's entire UTXO set back to the L1.
+
+    Non-blocking on the contestation deadline: called before the head is
+    fanout-ready it reports the remaining wait instead of hanging.
+    """
+    try:
+        readiness = get_client(node).fanout_readiness()
+    except Exception as e:
+        return err(str(e), node=node)
+    if not readiness["ready"]:
+        remaining = readiness.get("seconds_remaining")
+        return ok("not_ready", node=node,
+                  head_state=readiness.get("head_state"),
+                  contestation_deadline=readiness.get("contestation_deadline"),
+                  seconds_remaining=remaining,
+                  message=(f"fanout possible in ~{remaining:.0f}s"
+                           if remaining is not None else
+                           "head is not closed; nothing to fan out"))
     if not confirm:
         return needs_confirmation(
             f"fan out the closed head via node {node}, distributing all head "
@@ -127,6 +160,51 @@ def fanout(node: int = 1, confirm: bool = False) -> dict:
         return err(str(e), node=node)
     return ok("finalized", node=node, event=event.get("tag"),
               finalized_utxo_count=len(event.get("finalizedUTxO") or {}))
+
+
+def sideload_snapshot(from_node: int, to_node: int, confirm: bool = False) -> dict:
+    """Recover a forked head: fetch the confirmed snapshot from one node and
+    side-load it into another whose ledger state diverged.
+
+    This is the documented recovery when peers stop signing snapshots because
+    their local states disagree. All peers must converge on the same snapshot;
+    run this toward each diverged node.
+    """
+    try:
+        snapshot = get_client(from_node).get_snapshot()
+    except Exception as e:
+        return err(f"could not fetch snapshot from node {from_node}: {e}")
+    if not snapshot:
+        return err(f"node {from_node} has no confirmed snapshot to share")
+    number = ((snapshot.get("snapshot") or {}).get("number")
+              if isinstance(snapshot.get("snapshot"), dict) else None)
+    if not confirm:
+        return needs_confirmation(
+            f"side-load node {from_node}'s confirmed snapshot"
+            f"{f' #{number}' if number is not None else ''} into node "
+            f"{to_node}, overriding its local ledger state",
+            from_node=from_node, to_node=to_node, snapshot_number=number)
+    try:
+        result = get_client(to_node).sideload_snapshot(snapshot)
+    except Exception as e:
+        return err(str(e), from_node=from_node, to_node=to_node)
+    return ok("sideloaded", from_node=from_node, to_node=to_node,
+              snapshot_number=number, result=result)
+
+
+def wait_for_event(tags: list, node: int = 1, timeout_seconds: int = 120) -> dict:
+    """Block (bounded, max 600s) until the node emits one of the named
+    events — for when waiting IS the intent, e.g. ReadyToFanout on a devnet
+    or a short-CP testnet. For long contestation periods, poll head_status
+    instead of holding this open."""
+    timeout_seconds = min(max(int(timeout_seconds), 1), 600)
+    try:
+        event = get_client(node).wait_for(set(tags), timeout=timeout_seconds)
+    except TimeoutError:
+        return err(f"none of {tags} observed within {timeout_seconds}s", node=node)
+    except Exception as e:
+        return err(str(e), node=node)
+    return ok("observed", node=node, event=event.get("tag"))
 
 
 def partial_fanout(utxo_refs: list, node: int = 1, confirm: bool = False) -> dict:

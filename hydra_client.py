@@ -92,9 +92,35 @@ class HydraClient:
             raise HydraClientError(f"commit draft failed: {r.status_code} {r.text[:400]}")
         return r.json()
 
+    def get_snapshot(self) -> dict:
+        """The latest confirmed snapshot (GET /snapshot)."""
+        return self._get("/snapshot") or {}
+
+    def sideload_snapshot(self, snapshot: dict) -> dict:
+        """POST /snapshot — side-load a confirmed snapshot to re-align a node
+        whose ledger state diverged (the documented forked-head recovery)."""
+        r = httpx.post(f"{self.http_url}/snapshot", json=snapshot, timeout=120.0)
+        if r.status_code != 200:
+            raise HydraClientError(
+                f"snapshot side-load failed: {r.status_code} {r.text[:400]}")
+        try:
+            return r.json()
+        except ValueError:
+            return {"response": r.text[:400]}
+
     def recover_deposit(self, tx_id: str) -> dict:
-        """DELETE /commits/{txid} — recover a stuck deposit back to L1."""
-        r = httpx.delete(f"{self.http_url}/commits/{tx_id}", timeout=60.0)
+        """DELETE /commits/{txid} — recover a stuck deposit back to L1.
+
+        The node performs the L1 recovery inside this request, which on a
+        real network can outlast any sane HTTP timeout — treat a timeout as
+        'requested' and let the caller verify via pending_deposits/l1_funds.
+        """
+        try:
+            r = httpx.delete(f"{self.http_url}/commits/{tx_id}", timeout=180.0)
+        except httpx.TimeoutException:
+            return {"requested": True,
+                    "note": "recovery request accepted but still in flight; "
+                            "verify via pending_deposits and the L1 balance"}
         if r.status_code != 200:
             raise HydraClientError(f"recover failed: {r.status_code} {r.text[:400]}")
         try:
@@ -125,10 +151,57 @@ class HydraClient:
             timeout,
         )
 
-    def close_head(self, timeout: float = 120.0) -> dict:
-        return self._call(self._command_and_wait({"tag": "Close"}, {"HeadIsClosed"}), timeout)
+    def close_head(self, observe_timeout: float = 90.0, retries: int = 2) -> dict:
+        """Post Close and wait (bounded) for it to be observed on-chain.
 
-    def decommit(self, tx_envelope: dict, timeout: float = 120.0) -> dict:
+        A Close tx can be silently dropped when its upper validity bound goes
+        stale (hydra issue #1039) — the node does not retry, so we do: if
+        HeadIsClosed isn't observed within observe_timeout, Close is posted
+        again, up to `retries` more times.
+        """
+        last_error = None
+        for attempt in range(1 + retries):
+            try:
+                return self._call(
+                    self._command_and_wait({"tag": "Close"}, {"HeadIsClosed"}),
+                    observe_timeout,
+                )
+            except HydraClientError:
+                raise  # a rejected command won't improve with retries
+            except Exception as e:  # timeout: possibly-dropped close tx
+                last_error = e
+        raise HydraClientError(
+            f"Close not observed on-chain after {1 + retries} attempts "
+            f"({observe_timeout:.0f}s each) — likely dropped (issue #1039); "
+            f"check chain congestion and node sync, then retry"
+        ) from last_error
+
+    def fanout_readiness(self) -> dict:
+        """Non-blocking: can Fanout be posted now, and if not, when?"""
+        status = self.get_head_status()
+        ready = status in ("fanout_possible", "fanoutpossible",
+                           "fanning_out", "fanningout")
+        remaining = None
+        deadline = None
+        head = self.get_head()
+        if head.get("tag") == "Closed":
+            deadline = (head.get("contents") or {}).get("contestationDeadline")
+            if deadline:
+                from datetime import datetime, timezone
+                try:
+                    dt = datetime.fromisoformat(deadline.replace("Z", "+00:00"))
+                    remaining = max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
+                except ValueError:
+                    pass
+        elif head.get("tag") == "FanoutPossible":
+            ready = True
+        return {"ready": ready, "head_state": head.get("tag"),
+                "contestation_deadline": deadline,
+                "seconds_remaining": remaining}
+
+    def decommit(self, tx_envelope: dict, timeout: float = 600.0) -> dict:
+        # DecommitFinalized arrives only after the L1 decrement settles —
+        # several blocks on a real network, so the window must be generous.
         return self._call(
             self._command_and_wait(
                 {"tag": "Decommit", "decommitTx": tx_envelope},
@@ -138,6 +211,8 @@ class HydraClient:
         )
 
     def fanout(self, timeout: float = 300.0) -> dict:
+        """Post Fanout (the head must already be past its deadline — check
+        fanout_readiness first) and wait for finalization."""
         return self._call(self._fanout(), timeout)
 
     def partial_fanout(self, utxo: dict, timeout: float = 300.0) -> dict:
@@ -230,10 +305,11 @@ class HydraClient:
     def _is_rejection(event: dict) -> bool:
         # CommandFailed carries a tag; an input the node cannot even parse
         # (e.g. a command this node version does not know) comes back as a
-        # bare {"input": ..., "reason": ...} with NO tag field.
-        return event.get("tag") in ("CommandFailed", "InvalidInput") or (
-            event.get("tag") is None and "reason" in event
-        )
+        # bare {"input": ..., "reason": ...} with NO tag field. A node that
+        # thinks it is behind the chain answers RejectedInputBecauseUnsynced.
+        return event.get("tag") in (
+            "CommandFailed", "InvalidInput", "RejectedInputBecauseUnsynced"
+        ) or (event.get("tag") is None and "reason" in event)
 
     async def _command_and_wait(self, command: dict, ok_tags: set) -> dict:
         marker = len(self._events)
@@ -249,6 +325,14 @@ class HydraClient:
             await self._event_cond.wait_for(lambda: _resolved(self._events[marker:]) is not None)
             event = _resolved(self._events[marker:])
         if self._is_rejection(event):
+            if event.get("tag") == "RejectedInputBecauseUnsynced":
+                raise HydraClientError(
+                    f"node rejected the input as UNSYNCED (drift "
+                    f"{event.get('drift')}s): it has not seen a block within "
+                    f"its --unsynced-period. On short contestation periods "
+                    f"the default (CP/2) is below real inter-block gaps — "
+                    f"raise HYDRA_OPS_UNSYNCED_PERIOD or the CP, or retry "
+                    f"after the next block")
             reason = event.get("reason") or json.dumps(event)[:400]
             raise HydraClientError(f"command rejected: {str(reason)[:400]}")
         return event
@@ -276,9 +360,11 @@ class HydraClient:
 
     async def _await_fanout_ready(self):
         # "fanning_out" counts: after a first PartialFanout the node awaits the
-        # next selection and never re-emits ReadyToFanout.
+        # next selection and never re-emits ReadyToFanout. The wait here is a
+        # short grace for the just-past-deadline race only — long waits belong
+        # to the caller (fanout_readiness / wait_for), never inside a command.
         if self._head_status not in ("fanout_possible", "fanoutpossible", "fanning_out", "fanningout"):
-            await self._wait_for_event({"ReadyToFanout"})
+            await asyncio.wait_for(self._wait_for_event({"ReadyToFanout"}), timeout=120.0)
 
     async def _fanout(self) -> dict:
         await self._await_fanout_ready()
@@ -305,3 +391,16 @@ def get_client(node: int = 1) -> HydraClient:
         client.start()
         _clients[node] = client
     return _clients[node]
+
+
+def drop_client(node: int = None) -> None:
+    """Forget cached client(s) — required after a node restarts, or the
+    cached WebSocket points at a dead container."""
+    targets = [node] if node is not None else list(_clients)
+    for n in targets:
+        client = _clients.pop(n, None)
+        if client is not None:
+            try:
+                client.stop()
+            except Exception:
+                pass

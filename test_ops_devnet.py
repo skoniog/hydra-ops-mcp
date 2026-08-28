@@ -100,6 +100,12 @@ def main():
     bob_refs = [u["ref"] for u in utxos.get(bob_addr, [])]
     assert bob_refs, "bob should hold a head UTXO to partially fan out"
 
+    # fanout/partial_fanout are non-blocking on the deadline now; wait the
+    # devnet's short contestation period out explicitly first.
+    check("wait ReadyToFanout", lifecycle.wait_for_event(["ReadyToFanout"],
+                                                         timeout_seconds=90),
+          "observed")
+
     r = lifecycle.partial_fanout(bob_refs, confirm=True)
     if r["status"] == "partially_fanned_out":
         remaining = r.get("remaining") or {}

@@ -1,16 +1,21 @@
 # hydra-ops-mcp
 
-**Operate a Hydra head by talking to it.** An MCP server that exposes a
-running head — lifecycle, ledger, L1 wallets, node logs, and on-chain error
-codes — as tools an LLM client can call, so you can drive and debug a head
-in plain language instead of switching between a TUI, `curl`, `cardano-cli`,
-and `docker logs`.
+**Spin up a hydra-node, form a head with peers, and operate it — by talking
+to it.** An MCP server that exposes the whole journey as tools an LLM client
+can call: generate keys, build the head's ledger parameters, exchange peer
+info with a counterparty, start your node, then drive the head — deposits,
+in-head transactions, `decommit`, `close`, `fanout`, selective partial
+fanout, deposit recovery — plus read-only views of head state and the L1,
+node logs, and on-chain error decoding.
 
-It covers the full operational surface: `init`, deposits, in-head
-transactions, `decommit`, `close`, `fanout`, partial fanout, and deposit
-recovery, plus read-only views of head state and the L1. Every operation that
-changes state describes what it would do and waits for your explicit
-confirmation before doing it.
+Every operation that changes state describes what it would do and waits for
+your explicit confirmation before doing it.
+
+**v2** adds node provisioning, pluggable L1 access (Blockfrost / local
+cardano-cli / the devnet container), network configurability
+(devnet/preview/preprod/mainnet), and timing-safe lifecycle semantics for
+real contestation periods. The devnet remains the default and the zero-cost
+regression bed.
 
 ---
 
@@ -367,25 +372,84 @@ client waiting on tagged events will hang. The client here handles it.
 
 ---
 
+## Provisioning a node (v2)
+
+The path from nothing to a running participant, all as tool calls:
+
+```
+generate_keys("alice")            fuel + funds Cardano pairs, Hydra keys
+   └─ fund the fuel address       ~30 ada — the one step no tool can do
+build_protocol_parameters()       live network params, only fees zeroed
+share_peer_info("alice", host)    → send to your counterparty
+node_plan(...peers...)            preview the exact container command
+start_node(...)                   run it; node_health() confirms peered
+```
+
+Nodes run as containers of `HYDRA_NODE_IMAGE` (default: the 2.3.0 release)
+on a shared docker network, so same-host nodes reach each other by container
+name; remote peers use published ports and a reachable `advertise_host`.
+Verified live: two parties provisioned from scratch on the devnet with zero
+funds, mutually peered (`hydra_head_peers_connected=1`), and — funded from
+the devnet faucet — a full head lifecycle through **selective partial
+fanout** on a master-built (`unstable`) node.
+
+Select the axes with environment variables: `HYDRA_OPS_NETWORK`
+(devnet/preview/preprod/mainnet), `HYDRA_OPS_PROVIDER`
+(docker/cli/blockfrost), `HYDRA_OPS_WORKSPACE` (keys, configs, persistence),
+`HYDRA_NODE_IMAGE`, `HYDRA_SCRIPTS_TX_ID` (overrides published script ids —
+required for unstable builds, whose validators differ from every release).
+
 ## Limitations
 
-**`partial_fanout` needs a node newer than 2.3.0.** The command postdates the
-release (hydra PR #2750, commit `a271cced2`), and the pinned demo image
-rejects it — the node lists the commands it knows and `PartialFanout` isn't
-among them. The tool detects this precisely and reports the version gap. The
-code path is ready for a node built from master but has only been exercised up
-to that rejection.
+**`partial_fanout` needs a node newer than 2.3.0** — the command postdates
+the latest release (hydra PR #2750). Against release images the tool reports
+the version gap precisely; against `HYDRA_NODE_IMAGE=…:unstable` the full
+selective-drain flow is verified working (see Provisioning above), which
+also requires publishing that build's own scripts.
 
-**Fees are zero.** `tx_builder.py` hardcodes `fee=0`, which is correct for the
-demo's protocol parameters and wrong everywhere else. Real fee estimation and
-coin selection are needed before this points at preview/preprod or mainnet.
+**Verified on preview, end to end, over Blockfrost** — no cardano-node
+anywhere: two parties provisioned from scratch, faucet-funded, both nodes on
+the `--blockfrost` backend, then init → 10,000 tADA deposit → in-head
+payments (**0.2 s finality**) → decommit (funds verified back on L1 with the
+head open) → close (~3 min, the automatic close-retry fired and recovered a
+dropped Close) → 60 s contestation → fanout (~3 min) → final L1 balances
+exact to the lovelace.
 
-**Devnet-shaped assumptions.** Three parties with known key names, keys
-readable inside the cardano-node container, `docker compose` available for L1
-queries and logs. The head API layer is general; the L1 helpers are not.
+Real-network operating notes learned from that run:
+
+- **`--unsynced-period` defaults to CP/2**, which on a short testnet CP
+  (60 s) sits below preview's real inter-block gaps — the node then randomly
+  rejects inputs with `RejectedInputBecauseUnsynced`. Set
+  `HYDRA_OPS_UNSYNCED_PERIOD` (e.g. 600) for short-CP testing; on proper CPs
+  the default is fine.
+- **A 60 s deposit period is too tight on preview** — the 3×DP deadline
+  expires before absorption can settle and the deposit lapses
+  (`DepositExpired`; `recover_deposit` gets the funds back, verified live).
+  DP=180 absorbed reliably in ~6 min.
+- **Right after absorption there is a brief settling window** where spending
+  the deposited UTXO is rejected with "all inputs are spent"; retry moments
+  later succeeds.
+- L1-touching operations take minutes, not seconds: budget ~2–4 min each for
+  close, decommit settlement, and fanout at preview block times.
+
+**Devnet keys for alice/bob/carol come from the demo directory**; provisioned
+parties keep their keys in the workspace, `chmod 600`, and tools never return
+secret material. There is still no authentication on the MCP surface itself.
 
 **ADA only.** Transaction building handles pure-lovelace UTXOs — no native
 tokens, scripts, datums, or minting.
+
+**Hard-won signing rule:** a node-built draft (deposits) must never be
+re-serialized before witnessing — neither PyCardano nor cbor2 round-trips
+them byte-exactly, and a re-encoded body means the signature is over the
+wrong hash (`InvalidWitnessesUTXOW`). `tx_builder.sign_envelope` locates the
+body's exact byte span with a CBOR scanner and signs that.
+
+**Master's deposit timing differs:** unstable builds add
+`--deposit-activation` (default **3600s**) governing when a deposit becomes
+absorbable, independent of `--deposit-period`. Without setting it, deposits
+sit inactive for an hour. `node_plan` passes it automatically when the image
+supports it.
 
 **`recover_deposit` is untested against a genuinely stuck deposit.** It
 follows the API, but the demo devnet absorbs deposits too reliably to produce
